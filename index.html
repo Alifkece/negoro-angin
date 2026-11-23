@@ -251,6 +251,7 @@
       <div class="row"><button id="go">Putar</button></div>
     </div>
     <div id="hint"></div>
+    <audio id="bgm" src="negoro.mp3" preload="auto" playsinline></audio>
     <script>
       // ====== GANTI TEKS & WAKTU DI SINI ======
       let LINES = [
@@ -270,7 +271,7 @@
       let STARTS = [
         0.0, 4.01, 7.13, 10.22, 15.05, 17.22, 22.0, 25.21, 28.28, 33.2,
       ];
-      const END_AT = 35.0; // durasi lagu (detik)
+      const END_AT = 35.0; // batas akhir animasi teks (detik). Musik TIDAK dipotong di sini; dibiarkan sampai habis (~59,7 dtk)
       const COUNTDOWN = 3; // hitung mundur sebelum mulai (detik)
       const TYPE_MAX = 0.11; // paling lambat: detik per huruf
       // =========================================
@@ -322,10 +323,93 @@
         return LINES.map((_, i) => (i * END_AT * 0.95) / LINES.length);
       }
 
+      // ===== AUDIO: satu instance <audio>, dimulai sinkron dengan animasi =====
+      const bgm = document.getElementById("bgm");
+      bgm.loop = false;
+      let unlocked = false; // sudah "dibuka" oleh gestur pengguna (kebijakan autoplay)
+      let abortStart = null; // membatalkan permintaan start audio yang masih menunggu
+
+      function stopAudio() {
+        if (abortStart) abortStart();
+        try {
+          bgm.pause();
+          bgm.currentTime = 0;
+        } catch (e) {}
+      }
+
+      // Dipanggil di dalam gestur ketuk/klik: mainkan senyap lalu jeda, supaya
+      // browser mobile (Chrome Android, iOS Safari) mengizinkan play() setelah hitung mundur.
+      function unlockAudio(myRun) {
+        if (unlocked) return;
+        try {
+          if (bgm.error) bgm.load();
+          bgm.muted = true;
+          const p = bgm.play();
+          const back = () => {
+            if (myRun !== run) return; // sudah ada putaran baru yang mengurus audio
+            try {
+              bgm.pause();
+              bgm.currentTime = 0;
+            } catch (e) {}
+            bgm.muted = false;
+          };
+          if (p && p.then)
+            p.then(() => {
+              back();
+              unlocked = true;
+            }).catch(() => {
+              bgm.muted = false;
+            });
+          else {
+            back();
+            unlocked = true;
+          }
+        } catch (e) {
+          bgm.muted = false;
+        }
+      }
+
+      // Mulai musik dari detik 0, lalu resolve dengan "t0" (waktu performance.now()
+      // saat detik 0 musik benar-benar terdengar). Kalau audio gagal, animasi tetap jalan.
+      function startAudio() {
+        return new Promise((resolve) => {
+          let done = false,
+            to = null;
+          const finish = (ok) => {
+            if (done) return;
+            done = true;
+            abortStart = null;
+            clearTimeout(to);
+            bgm.removeEventListener("playing", onPlaying);
+            if (ok) return resolve(performance.now() - bgm.currentTime * 1000);
+            try {
+              bgm.pause();
+            } catch (e) {}
+            resolve(performance.now());
+          };
+          const onPlaying = () => finish(true);
+          abortStart = () => finish(false);
+          bgm.addEventListener("playing", onPlaying);
+          to = setTimeout(() => finish(false), 3000);
+          try {
+            bgm.pause();
+            bgm.currentTime = 0;
+            bgm.muted = false;
+            bgm.volume = 1;
+            const p = bgm.play();
+            if (p && p.catch) p.catch(() => finish(false));
+          } catch (e) {
+            finish(false);
+          }
+        });
+      }
+
       let run = 0;
 
       function play() {
         const id = ++run;
+        stopAudio(); // pastikan tidak ada audio lama / ganda
+        unlockAudio(id); // masih di dalam gestur pengguna
         const starts = getStarts();
         const els = [];
         stage.innerHTML = "";
@@ -367,18 +451,34 @@
         make(0);
         let lastA = -1,
           lastN = -1;
-        const t0 = performance.now() + COUNTDOWN * 1000;
+        const cdEnd = performance.now() + COUNTDOWN * 1000;
+        let t0 = null, // detik 0 = saat musik mulai terdengar
+          starting = false;
 
         const tick = () => {
           if (id !== run) return;
-          const t = (performance.now() - t0) / 1000;
 
-          if (t < 0) {
-            hint.textContent = "mulai dalam " + Math.ceil(-t);
-            hint.classList.add("show");
-            return requestAnimationFrame(tick);
+          if (t0 === null) {
+            const rem = (cdEnd - performance.now()) / 1000;
+            if (rem > 0) {
+              hint.textContent = "mulai dalam " + Math.ceil(rem);
+              hint.classList.add("show");
+              return requestAnimationFrame(tick);
+            }
+            hint.classList.remove("show");
+            if (!starting) {
+              starting = true;
+              // hitung mundur selesai: musik mulai dari 0, animasi menyusul tepat saat musik terdengar
+              startAudio().then((base) => {
+                if (id !== run) return;
+                t0 = base;
+                requestAnimationFrame(tick);
+              });
+            }
+            return;
           }
-          hint.classList.remove("show");
+
+          const t = (performance.now() - t0) / 1000;
 
           while (
             els.length < LINES.length &&
